@@ -2,12 +2,15 @@ sudo: false
 
 language: python
 
-https://docs.travis-ci.com/user/languages/python/#using-tox-as-the-build-script
+# https://docs.travis-ci.com/user/languages/python/#using-tox-as-the-build-script
 matrix:
   include:
     - python: 3.8
+      env: TOXENV=py38
     - python: 3.7
+      env: TOXENV=py37
     - python: 3.6
+      env: TOXENV=py36
 
 install: pip install tox-travis
 
