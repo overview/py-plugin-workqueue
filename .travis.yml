@@ -2,13 +2,16 @@ sudo: false
 
 language: python
 
-python:
-  - "3.6"
-  - "3.7"
-  - "3.8"
+https://docs.travis-ci.com/user/languages/python/#using-tox-as-the-build-script
+matrix:
+  include:
+    - python: 3.8
+    - python: 3.7
+    - python: 3.6
 
-script:
-  - tox
+install: pip install tox-travis
+
+script: tox
 
 deploy:
   provider: pypi
