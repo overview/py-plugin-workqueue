@@ -7,15 +7,7 @@ python:
   - "3.7"
   - "3.8"
 
-install:
-  - pip install black pyflakes isort
-  - pip install -e .
-  - pip freeze
-
 script:
-  - pyflakes .
-  - black --check .
-  - isort --check-only --diff --recursive channels_rabbitmq tests
   - tox
 
 deploy:
