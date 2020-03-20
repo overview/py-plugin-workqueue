@@ -169,3 +169,28 @@ great place to start. Here are the parts that will limit you:
   TODO read and write S3-compatible storage servers.
 * **single-server**: ``workqueue`` cannot distribute load across multiple
   machines. Use a different process to achieve that.
+
+Developing This Package
+=======================
+
+Install dependency: ``pip3 install --user tox``
+
+Run ``tox`` to make sure it works for you.
+
+Then the development loop:
+
+1. Write a test. Run ``tox`` and prove to yourself it fails.
+2. Write code. Run ``tox`` to prove it solves your problem.
+3. Submit a pull request.
+
+Release Process
+---------------
+
+1. Edit the ``version=`` line in ``setup.py``. Adhere to semver.
+2. ``git commit setup.py -m "vX.X.X" && git push``
+3. ``python ./setup.py sdist && twine check dist/* && twine upload dist/*-X.X.X.tar.gz``
+
+License
+=======
+
+MIT. See ``LICENSE``.
