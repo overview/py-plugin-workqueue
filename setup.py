@@ -9,7 +9,7 @@ with open(os.path.join(os.path.dirname(__file__), "README.rst"), encoding="utf-8
 
 setup(
     name="overview-plugin-workqueue",
-    version="1.0.0",
+    version="1.0.1",
     description="In-process work queue for use in Overview plugins",
     long_description=long_description,
     long_description_content_type="text/x-rst",
