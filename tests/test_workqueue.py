@@ -113,6 +113,35 @@ def test_progress_message(work):
     assert Progress(fraction=0.9, message="bye") in progresses
 
 
+def test_os_link_failure(work):
+    params = build_params("sleephalfsecond", "hi")
+    job = work.ensure_run(params)
+    # Simulate a race: the _destination file_ gets written before
+    # helper-program finishes. (After helper-program exits, workqueue copies
+    # its _tempfile_ output to the _destination file_.)
+    destination_path = work.destination_path_for_params(params)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.write_bytes(b"race?")
+    for progress in work.report_job_progress_until_completed(job):
+        pass
+    assert (progress.returncode, progress.error[:87]) == (
+        -999,
+        "Exited with code -999\nstderr:\n"
+        "Failed to link destination file: [Errno 17] File exists: ",
+    )
+
+
+def test_os_stat_failure(work):
+    job = work.ensure_run(build_params("succeedbutdeletefile", "hi"))
+    for progress in work.report_job_progress_until_completed(job):
+        pass
+    assert (progress.returncode, progress.error[:95]) == (
+        -999,
+        "Exited with code -999\nstderr:\n"
+        "Failed to stat output file: [Errno 2] No such file or directory: ",
+    )
+
+
 def simulate_a_program(args: List[str]) -> None:
     """
     The "helper-program" aspect of this Python file.
@@ -129,6 +158,9 @@ def simulate_a_program(args: List[str]) -> None:
         sys.stderr.write(api_token)
         sys.exit(1)
     elif document_set_id == "succeedbutforgettowritefile":
+        sys.exit(0)
+    elif document_set_id == "succeedbutdeletefile":
+        Path(output_path).unlink()
         sys.exit(0)
     elif document_set_id == "succeedbutwritejunktostdout":
         sys.stdout.write("not progress\n")

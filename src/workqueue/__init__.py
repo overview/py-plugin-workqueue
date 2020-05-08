@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import selectors
@@ -7,7 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterator, NamedTuple, Optional
+from typing import ContextManager, Dict, Iterator, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL = 0.25  # seconds
@@ -25,9 +26,7 @@ class OverviewViewParams(NamedTuple):
 
 
 class Progress(NamedTuple):
-    """
-    A snapshot in time of a Job's status.
-    """
+    """A snapshot in time of a Job's status."""
 
     n_ahead_in_queue: int = 0
     """Number of jobs ahead of the requested one (0 means 'this one is running')."""
@@ -60,8 +59,7 @@ class Job:
     was_started: threading.Event = field(default_factory=threading.Event)
 
     last_stdout_line: Optional[bytes] = None
-    """
-    Last line of progress from subprocess.
+    """Last line of progress from subprocess.
 
     e.g., "0.23" or "0.23\tworking...".
 
@@ -72,15 +70,13 @@ class Job:
     """When set, job is completed."""
 
     returncode: Optional[int] = None
-    """
-    Process returncode. 0 means success.
+    """Process returncode. 0 means success.
 
     Do not read this until .was_completed.is_set().
     """
 
     stderr: Optional[bytes] = None
-    """
-    Process stderr (in binary).
+    """Process stderr (in binary).
 
     Do not read this until .was_completed.is_set().
     """
@@ -127,8 +123,7 @@ class Job:
 
 @dataclass
 class State:
-    """
-    Currently running and pending jobs.
+    """Currently running and pending jobs.
 
     This is not thread-safe. Callers must coordinate using a lock.
     """
@@ -140,10 +135,21 @@ class State:
     """Started, not-yet-completed jobs."""
 
 
+@contextlib.contextmanager
+def _tempfile_context(**kwargs) -> ContextManager[Path]:
+    fd, tempfile_name = tempfile.mkstemp(**kwargs)
+    try:
+        yield Path(tempfile_name)
+    finally:
+        try:
+            os.unlink(tempfile_name)
+        except FileNotFoundError:
+            pass
+
+
 @dataclass(frozen=True)
 class WorkQueue:
-    """
-    Debouncer of huge jobs.
+    """Debouncer of huge jobs.
 
     We never run two jobs with the same `params`.
 
@@ -198,8 +204,7 @@ class WorkQueue:
     """
 
     program_path: Path
-    """
-    Path to a program with 4 positional params. Run as:
+    """Path to a program with 4 positional params. Run as:
 
         /path/to/program server document_set_id api_token output_path
 
@@ -214,16 +219,13 @@ class WorkQueue:
     executor: ThreadPoolExecutor
 
     storage_dir: Path
-    """
-    Path where we store data.
-    """
+    """Path where we store data."""
 
     state_lock: threading.Lock = field(default_factory=threading.Lock)
     state: State = field(default_factory=State)
 
     def _run_one_job(self, job) -> None:
-        """
-        Called by self.executor.
+        """Called by self.executor.
 
         Execute one job, updating state and job.current_progress.
         """
@@ -236,22 +238,23 @@ class WorkQueue:
             self.state.running[job.params] = job
             job.was_started.set()
 
-        # Run the subprocess. Sets job.last_stdout_line repeatedly, then
-        # job.stderr and job.returncode
-        with tempfile.NamedTemporaryFile(
+        with _tempfile_context(
             dir=self.storage_dir, prefix="building-model-", suffix=".tmp"
-        ) as tf:
+        ) as tempfile_path:
+            # Run the subprocess. Sets job.last_stdout_line repeatedly, then
+            # job.stderr and job.returncode
             with subprocess.Popen(
                 [
                     self.program_path,
                     job.params.server,
                     job.params.document_set_id,
                     job.params.api_token,
-                    tf.name,
+                    tempfile_path.as_posix(),
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,  # so progress reports aren't delayed
+                close_fds=True,
             ) as popen:
                 # Read from both stdout and stderr at the same time. This
                 # requires non-blocking reads and selectors. (If we don't do
@@ -302,27 +305,52 @@ class WorkQueue:
                 job.stderr = b"".join(stderr)
 
             if job.returncode == 0:
-                if os.stat(tf.name).st_size == 0:
-                    # Assume the file is empty because the script neglected to
-                    # write to it -- erroneously.
-                    job.returncode = -999  # clearly not a POSIX returncode
-                    job.stderr = (
-                        b"invalid program: it should have written to its output file"
-                    )
-                    logger.warning(
-                        "invalid program: it should have written to its output file"
-                    )
-                else:
-                    # Rename tempfile to its final resting place.
-                    #
-                    # Hard-link so tempfile.NamedTemporaryFile() can unlink its
-                    # own handle without error ... and to ensure we're atomic.
-                    os.link(tf.name, destination_path)
+                self._move_job_output_or_set_job_error(
+                    job, tempfile_path, destination_path
+                )
 
         # Set to completed
         with self.state_lock:
             del self.state.running[job.params]
             job.was_completed.set()
+
+    def _move_job_output_or_set_job_error(
+        self, job: Job, tempfile_path: Path, destination_path: Path
+    ) -> None:
+        """Atomically move job output to destination_path.
+
+        In case of error, set job.returncode to -999 and job.stderr to a
+        message.
+        """
+        try:
+            size = os.stat(tempfile_path).st_size
+        except OSError as err:
+            job.returncode = -999  # clearly not a POSIX returncode
+            job.stderr = b"Failed to stat output file: " + str(err).encode("utf-8")
+            logger.exception("Failed to stat output file")
+            return
+
+        if size == 0:
+            # Assume the file is empty because the script neglected to
+            # write to it -- erroneously.
+            job.returncode = -999  # clearly not a POSIX returncode
+            job.stderr = b"invalid program: it should have written to its output file"
+            logger.warning("invalid program: it should have written to its output file")
+            return
+
+        # Rename tempfile to its final resting place.
+        #
+        # Hard-link so tempfile.NamedTemporaryFile() can unlink its
+        # own handle without error ... and to ensure we're atomic.
+        try:
+            os.link(tempfile_path, destination_path)
+        except OSError as err:
+            job.returncode = -999  # clearly not a POSIX returncode
+            job.stderr = b"Failed to link destination file: " + str(err).encode("utf-8")
+            logger.exception("Failed to link destination file")
+            return
+
+        # Everything is okay.
 
     def destination_path_for_params(self, params: OverviewViewParams) -> Path:
         return (
@@ -333,8 +361,7 @@ class WorkQueue:
         )
 
     def ensure_run(self, params: OverviewViewParams) -> Optional[Job]:
-        """
-        Ensure a Job has been queued or completed with params `params`.
+        """Ensure a Job has been queued or completed with params `params`.
 
         Return `None` if we know the Job has been fully completed.
 
@@ -370,8 +397,7 @@ class WorkQueue:
         return job
 
     def report_job_progress_until_completed(self, job: Job) -> Iterator[Progress]:
-        """
-        Generate `Progress` events; raise `StopIteration` when the Job is done.
+        """Generate `Progress` events; raise `StopIteration` when the Job is done.
         """
         while not job.was_started.wait(POLL_INTERVAL):
             # Unstarted.
